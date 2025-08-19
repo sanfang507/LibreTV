@@ -603,18 +603,47 @@ function getCustomApiInfo(customApiIndex) {
     return customAPIs[index];
 }
 
-// 搜索功能 - 修改为支持多选API和多页结果
-
+// ----------------------------
+// 搜索功能（多 API + 多页 + 增量渲染）
+// ----------------------------
 async function search() {
+    // 强化密码保护
+    try {
+        if (window.ensurePasswordProtection) {
+            window.ensurePasswordProtection();
+        } else if (window.isPasswordProtected && window.isPasswordVerified) {
+            if (window.isPasswordProtected() && !window.isPasswordVerified()) {
+                showPasswordModal && showPasswordModal();
+                return;
+            }
+        }
+    } catch (error) {
+        console.warn('Password protection check failed:', error.message);
+        return;
+    }
+
     const query = document.getElementById('searchInput').value.trim();
-    if (!query || selectedAPIs.length === 0) return;
+    if (!query) {
+        showToast('请输入搜索内容', 'info');
+        return;
+    }
+    if (selectedAPIs.length === 0) {
+        showToast('请至少选择一个API源', 'warning');
+        return;
+    }
 
     showLoading();
+    saveSearchHistory(query);
+
     const resultsDiv = document.getElementById('results');
     resultsDiv.innerHTML = '';
 
+    // 检查黄色内容过滤
+    const yellowFilterEnabled = localStorage.getItem('yellowFilterEnabled') === 'true';
+    const bannedKeywords = ['伦理片', '福利', '里番动漫', '门事件', '萝莉少女', '制服诱惑', '国产传媒', 'cosplay', '黑丝诱惑', '无码', '日本无码', '有码', '日本有码', 'SWAG', '网红主播', '色情片', '同性片', '福利视频', '福利片'];
+
     try {
-        // 多 API 同时增量搜索
+        // 构建所有 API 的异步生成器
         const apiStreams = selectedAPIs.map(apiId => searchByAPIAndKeyWordStream(apiId, query));
         const readers = apiStreams.map(stream => stream[Symbol.asyncIterator]());
 
@@ -623,20 +652,105 @@ async function search() {
             const promises = readers.map(r => r.next());
             const results = await Promise.all(promises);
             activeReaders = 0;
+
             for (let i = 0; i < results.length; i++) {
                 const res = results[i];
                 if (!res.done) {
                     activeReaders++;
-                    renderSingleResult(res.value); // 每条结果立即渲染
+                    const item = res.value;
+
+                    // 黄色内容过滤
+                    if (yellowFilterEnabled && item.type_name) {
+                        const isBanned = bannedKeywords.some(k => (item.type_name || '').includes(k));
+                        if (isBanned) continue;
+                    }
+
+                    renderSingleResult(item);
                 }
             }
         }
-    } catch (e) {
-        console.error('搜索错误:', e);
+
+        // 更新搜索结果计数
+        const countEl = document.getElementById('searchResultsCount');
+        if (countEl) countEl.textContent = resultsDiv.children.length;
+
+        // 调整页面显示
+        document.getElementById('searchArea').classList.remove('flex-1');
+        document.getElementById('searchArea').classList.add('mb-8');
+        document.getElementById('resultsArea').classList.remove('hidden');
+        const doubanArea = document.getElementById('doubanArea');
+        if (doubanArea) doubanArea.classList.add('hidden');
+
+        // 更新浏览器历史和标题
+        const encodedQuery = encodeURIComponent(query);
+        window.history.pushState({ search: query }, `搜索: ${query} - LibreTV`, `/s=${encodedQuery}`);
+        document.title = `搜索: ${query} - LibreTV`;
+
+    } catch (error) {
+        console.error('搜索错误:', error);
+        if (error.name === 'AbortError') {
+            showToast('搜索请求超时，请检查网络连接', 'error');
+        } else {
+            showToast('搜索请求失败，请稍后重试', 'error');
+        }
     } finally {
         hideLoading();
     }
 }
+
+// ----------------------------
+// 渲染单条结果
+// ----------------------------
+function renderSingleResult(item) {
+    const resultsDiv = document.getElementById('results');
+    const safeId = item.vod_id ? item.vod_id.toString().replace(/[^\w-]/g, '') : '';
+    const safeName = (item.vod_name || '').toString()
+        .replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+    const hasCover = item.vod_pic && item.vod_pic.startsWith('http');
+    const sourceInfo = item.source_name ? `<span class="bg-[#222] text-xs px-1.5 py-0.5 rounded-full">${item.source_name}</span>` : '';
+    const apiUrlAttr = item.api_url ? `data-api-url="${item.api_url.replace(/"/g, '&quot;')}"` : '';
+
+    const html = `
+        <div class="card-hover bg-[#111] rounded-lg overflow-hidden cursor-pointer transition-all hover:scale-[1.02] h-full shadow-sm hover:shadow-md" 
+             onclick="showDetails('${safeId}','${safeName}','${item.source_code}')" ${apiUrlAttr}>
+            <div class="flex h-full">
+                ${hasCover ? `
+                <div class="relative flex-shrink-0 search-card-img-container">
+                    <img src="${item.vod_pic}" alt="${safeName}" 
+                         class="h-full w-full object-cover transition-transform hover:scale-110" 
+                         onerror="this.onerror=null; this.src='https://via.placeholder.com/300x450?text=无封面'; this.classList.add('object-contain');" 
+                         loading="lazy">
+                    <div class="absolute inset-0 bg-gradient-to-r from-black/30 to-transparent"></div>
+                </div>` : ''}
+                
+                <div class="p-2 flex flex-col flex-grow">
+                    <div class="flex-grow">
+                        <h3 class="font-semibold mb-2 break-words line-clamp-2 ${hasCover ? '' : 'text-center'}" title="${safeName}">${safeName}</h3>
+                        <div class="flex flex-wrap ${hasCover ? '' : 'justify-center'} gap-1 mb-2">
+                            ${(item.type_name || '').toString().replace(/</g, '&lt;') ?
+            `<span class="text-xs py-0.5 px-1.5 rounded bg-opacity-20 bg-blue-500 text-blue-300">
+                                      ${(item.type_name || '').toString().replace(/</g, '&lt;')}
+                                  </span>` : ''}
+                            ${(item.vod_year || '') ?
+            `<span class="text-xs py-0.5 px-1.5 rounded bg-opacity-20 bg-purple-500 text-purple-300">
+                                      ${item.vod_year}
+                                  </span>` : ''}
+                        </div>
+                        <p class="text-gray-400 line-clamp-2 overflow-hidden ${hasCover ? '' : 'text-center'} mb-2">
+                            ${(item.vod_remarks || '暂无介绍').toString().replace(/</g, '&lt;')}
+                        </p>
+                    </div>
+                    <div class="flex justify-between items-center mt-1 pt-1 border-t border-gray-800">
+                        ${sourceInfo ? `<div>${sourceInfo}</div>` : '<div></div>'}
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    resultsDiv.insertAdjacentHTML('beforeend', html);
+}
+
 
 // 切换清空按钮的显示状态
 function toggleClearButton() {
